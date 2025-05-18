@@ -25,7 +25,7 @@ def create_event(
         if not service:
             return{
                 "status": "error", 
-                "Message": "Failed to authenticate with Google Calendar. Please check credentials"
+                "message": "Failed to authenticate with Google Calendar. Please check credentials"
             }
             
         # Always use primary calendar
@@ -38,7 +38,7 @@ def create_event(
         if not start_dt or not end_dt:
             return{
                 "status" : "error", 
-                "Message": "Invalid date/time format. Please use YYYY-MM-DD HH:MM format. "
+                "message": "Invalid date/time format. Please use YYYY-MM-DD HH:MM format. "
             }
         # Dynamically datermine timezone 
         timezone_id = "Asia/Kolkata"
@@ -78,14 +78,14 @@ def create_event(
         )
         
         return {
-            'Status': "Success", 
-            "Message": "Event Created successful", 
-            'Event_id': event['id'], 
-            'Envent_lin': event.get('htmlLink', "")
+            'status': "Success", 
+            "message": "Event Created successful", 
+            'event_id': event['id'], 
+            'envent_lin': event.get('htmlLink', "")
         
         }
     except Exception as e: 
         return {
             "status": "error", 
-            'Message': f"Error creating event: {str(e)}"
+            'message': f"Error creating event: {str(e)}"
         }
