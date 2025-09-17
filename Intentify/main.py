@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import pipeline
+import uvicorn
 
 # Initialize FastAPI 
 app = FastAPI()
@@ -26,3 +27,7 @@ def predict_intent(request: TicketRequest):
         "predicted_intent": predicted_label,
         "confidence": confidence
     }
+    
+if __name__ == "__main__":
+    # Run FastAPI on port 8000
+    uvicorn.run(app, host="0.0.0.0", port=8000)
