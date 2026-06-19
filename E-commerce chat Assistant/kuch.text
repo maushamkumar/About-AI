@@ -1,0 +1,946 @@
+mongo_password = QtAGRbYAchseX2iE
+mongo user_name = maushamkumarr26_db_user
+
+main.py code 
+"""
+FastAPI server for furniture store chatbot
+"""
+import os
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from pymongo import MongoClient
+from agent import call_agent
+import time
+
+# Load environment variables
+load_dotenv()
+
+# Create FastAPI application
+app = FastAPI(title="LangGraph Agent Server")
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# MongoDB client
+client = MongoClient(os.getenv("MONGODB_ATLAS_URI"))
+
+
+# Request/Response models
+class ChatRequest(BaseModel):
+    message: str
+
+
+class ChatResponse(BaseModel):
+    threadId: str = None
+    response: str
+
+
+class ContinueChatRequest(BaseModel):
+    message: str
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database connection on startup"""
+    try:
+        # Verify MongoDB connection
+        client.admin.command('ping')
+        print("You successfully connected to MongoDB!")
+    except Exception as e:
+        print(f"Error connecting to MongoDB: {e}")
+        raise
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database connection on shutdown"""
+    client.close()
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {"message": "LangGraph Agent Server"}
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def start_chat(request: ChatRequest):
+    """Start a new conversation"""
+    initial_message = request.message
+    thread_id = str(int(time.time() * 1000))  # Generate unique thread ID
+    
+    print(f"Starting new chat with message: {initial_message}")
+    
+    try:
+        response = call_agent(client, initial_message, thread_id)
+        return ChatResponse(threadId=thread_id, response=response)
+    except Exception as error:
+        print(f"Error starting conversation: {error}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/chat/{thread_id}", response_model=ChatResponse)
+async def continue_chat(thread_id: str, request: ContinueChatRequest):
+    """Continue an existing conversation"""
+    message = request.message
+    
+    print(f"Continuing chat {thread_id} with message: {message}")
+    
+    try:
+        response = call_agent(client, message, thread_id)
+        return ChatResponse(response=response)
+    except Exception as error:
+        print(f"Error in chat: {error}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
+
+
+
+
+
+
+
+
+seed_database.py Code 
+"""
+Seed MongoDB database with synthetic furniture data using Google Gemini AI
+"""
+import os
+from typing import List, Dict, Any
+from dotenv import load_dotenv
+from pymongo import MongoClient
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_mongodb import MongoDBAtlasVectorSearch
+from pydantic import BaseModel, Field
+
+# Load environment variables
+load_dotenv()
+
+# MongoDB client
+client = MongoClient(os.getenv("MONGODB_ATLAS_URI"))
+
+
+class ManufacturerAddress(BaseModel):
+    """Manufacturer address schema"""
+    street: str
+    city: str
+    state: str
+    postal_code: str
+    country: str
+
+
+class Prices(BaseModel):
+    """Pricing information schema"""
+    full_price: float
+    sale_price: float
+
+
+class UserReview(BaseModel):
+    """User review schema"""
+    review_date: str
+    rating: float
+    comment: str
+
+
+class Item(BaseModel):
+    """Furniture item schema"""
+    item_id: str
+    item_name: str
+    item_description: str
+    brand: str
+    manufacturer_address: ManufacturerAddress
+    prices: Prices
+    categories: List[str]
+    user_reviews: List[UserReview]
+    notes: str
+
+
+# Initialize Gemini chat model
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-flash",
+    temperature=0.7,
+    google_api_key=os.getenv("GOOGLE_API_KEY")
+)
+
+# Create parser for list of items
+parser = JsonOutputParser(pydantic_object=List[Item])
+
+
+def setup_database_and_collection():
+    """Create database and collection if they don't exist"""
+    print("Setting up database and collection...")
+    
+    db = client["inventory_database"]
+    
+    # Check if collection exists
+    collections = db.list_collection_names()
+    
+    if "items" not in collections:
+        db.create_collection("items")
+        print("Created 'items' collection in 'inventory_database' database")
+    else:
+        print("'items' collection already exists in 'inventory_database' database")
+
+
+def create_vector_search_index():
+    """Create vector search index for embeddings"""
+    try:
+        db = client["inventory_database"]
+        collection = db["items"]
+        
+        # Drop existing indexes
+        collection.drop_indexes()
+        
+        # Define vector search index
+        vector_search_idx = {
+            "name": "vector_index",
+            "type": "vectorSearch",
+            "definition": {
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": 768,
+                        "similarity": "cosine"
+                    }
+                ]
+            }
+        }
+        
+        print("Creating vector search index...")
+        collection.create_search_index(vector_search_idx)
+        print("Successfully created vector search index")
+        
+    except Exception as e:
+        print(f"Failed to create vector search index: {e}")
+
+
+def generate_synthetic_data() -> List[Dict[str, Any]]:
+    """Generate synthetic furniture data using Gemini AI"""
+    prompt = f"""You are a helpful assistant that generates furniture store item data. 
+Generate 10 furniture store items as a JSON array. Each record should include the following fields:
+- item_id (string): unique identifier
+- item_name (string): name of the furniture
+- item_description (string): detailed description
+- brand (string): brand name
+- manufacturer_address (object): street, city, state, postal_code, country
+- prices (object): full_price (number), sale_price (number)
+- categories (array of strings): furniture categories
+- user_reviews (array of objects): review_date (string), rating (number 1-5), comment (string)
+- notes (string): additional notes
+
+Ensure variety in the data and realistic values. Return ONLY the JSON array, no markdown formatting.
+
+Example format:
+[
+  {{
+    "item_id": "FUR001",
+    "item_name": "Modern Sofa",
+    "item_description": "Comfortable 3-seater sofa with soft cushions",
+    "brand": "ComfortPlus",
+    "manufacturer_address": {{
+      "street": "123 Factory Rd",
+      "city": "Los Angeles",
+      "state": "CA",
+      "postal_code": "90001",
+      "country": "USA"
+    }},
+    "prices": {{
+      "full_price": 899.99,
+      "sale_price": 699.99
+    }},
+    "categories": ["Living Room", "Sofas", "Modern"],
+    "user_reviews": [
+      {{
+        "review_date": "2024-01-15",
+        "rating": 4.5,
+        "comment": "Very comfortable and stylish"
+      }}
+    ],
+    "notes": "Available in multiple colors"
+  }}
+]"""
+
+    print("Generating synthetic data...")
+    
+    response = llm.invoke(prompt)
+    
+    # Parse the response content
+    import json
+    content = response.content
+    
+    # Remove markdown code blocks if present
+    if "```json" in content:
+        content = content.split("```json")[1].split("```")[0].strip()
+    elif "```" in content:
+        content = content.split("```")[1].split("```")[0].strip()
+    
+    data = json.loads(content)
+    return data
+
+
+def create_item_summary(item: Dict[str, Any]) -> str:
+    """Create searchable text summary from item data"""
+    manufacturer_details = f"Made in {item['manufacturer_address']['country']}"
+    categories = ", ".join(item['categories'])
+    
+    user_reviews = " ".join([
+        f"Rated {review['rating']} on {review['review_date']}: {review['comment']}"
+        for review in item['user_reviews']
+    ])
+    
+    basic_info = f"{item['item_name']} {item['item_description']} from the brand {item['brand']}"
+    price = f"At full price it costs: {item['prices']['full_price']} USD, On sale it costs: {item['prices']['sale_price']} USD"
+    notes = item['notes']
+    
+    summary = f"{basic_info}. Manufacturer: {manufacturer_details}. Categories: {categories}. Reviews: {user_reviews}. Price: {price}. Notes: {notes}"
+    
+    return summary
+
+
+def seed_database():
+    """Main function to populate database with AI-generated data"""
+    try:
+        # Connect to MongoDB
+        client.admin.command('ping')
+        print("You successfully connected to MongoDB!")
+        
+        # Setup database and collection
+        setup_database_and_collection()
+        
+        # Create vector search index
+        create_vector_search_index()
+        
+        db = client["inventory_database"]
+        collection = db["items"]
+        
+        # Clear existing data
+        collection.delete_many({})
+        print("Cleared existing data from items collection")
+        
+        # Generate synthetic data
+        synthetic_data = generate_synthetic_data()
+        
+        # Initialize embeddings
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-004",
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        )
+        
+        # Process each item
+        for item in synthetic_data:
+            # Create summary
+            summary = create_item_summary(item)
+            
+            # Create document for vector store
+            from langchain_core.documents import Document
+            doc = Document(
+                page_content=summary,
+                metadata=item
+            )
+            
+            # Add to vector store
+            MongoDBAtlasVectorSearch.from_documents(
+                documents=[doc],
+                embedding=embeddings,
+                collection=collection,
+                index_name="vector_index",
+                text_key="embedding_text",
+                embedding_key="embedding"
+            )
+            
+            print(f"Successfully processed & saved record: {item['item_id']}")
+        
+        print("Database seeding completed")
+        
+    except Exception as e:
+        print(f"Error seeding database: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        client.close()
+
+
+if __name__ == "__main__":
+    seed_database()
+
+
+
+
+
+
+
+
+
+
+
+
+
+agent.py code 
+"""
+AI agent for furniture store chatbot using LangGraph and MongoDB
+"""
+import os
+import time
+import json
+from typing import Annotated, Literal, TypedDict
+from datetime import datetime
+from pymongo import MongoClient
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.tools import tool
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.mongodb import MongoDBSaver
+from langchain_mongodb import MongoDBAtlasVectorSearch
+from pydantic import BaseModel, Field
+
+
+def retry_with_backoff(func, max_retries=3):
+    """Utility function to handle API rate limits with exponential backoff"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            return func()
+        except Exception as error:
+            # Check if it's a rate limit error
+            if hasattr(error, 'status_code') and error.status_code == 429 and attempt < max_retries:
+                delay = min(2 ** attempt, 30)
+                print(f"Rate limit hit. Retrying in {delay} seconds...")
+                time.sleep(delay)
+                continue
+            raise error
+    raise Exception("Max retries exceeded")
+
+
+# Define the agent state
+class AgentState(TypedDict):
+    """State for the agent workflow"""
+    messages: Annotated[list[BaseMessage], "The messages in the conversation"]
+
+
+# Define the tool input schema
+class ItemLookupInput(BaseModel):
+    """Input for item lookup tool"""
+    query: str = Field(description="The search query")
+    n: int = Field(default=10, description="Number of results to return")
+
+
+@tool(args_schema=ItemLookupInput)
+def item_lookup(query: str, n: int = 10) -> str:
+    """Gathers furniture item details from the Inventory database"""
+    try:
+        print(f"Item lookup tool called with query: {query}")
+        
+        # Access MongoDB collection from the global client
+        collection = item_lookup.collection
+        
+        # Check if database has any data
+        total_count = collection.count_documents({})
+        print(f"Total documents in collection: {total_count}")
+        
+        if total_count == 0:
+            print("Collection is empty")
+            return json.dumps({
+                "error": "No items found in inventory",
+                "message": "The inventory database appears to be empty",
+                "count": 0
+            })
+        
+        # Get sample documents for debugging
+        sample_docs = list(collection.find({}).limit(3))
+        print(f"Sample documents: {len(sample_docs)} items")
+        
+        # Configuration for MongoDB Atlas Vector Search
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/text-embedding-004",
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        )
+        
+        # Create vector store instance
+        vector_store = MongoDBAtlasVectorSearch(
+            collection=collection,
+            embedding=embeddings,
+            index_name="vector_index",
+            text_key="embedding_text",
+            embedding_key="embedding"
+        )
+        
+        print("Performing vector search...")
+        # Perform semantic search
+        results = vector_store.similarity_search_with_score(query, k=n)
+        print(f"Vector search returned {len(results)} results")
+        
+        # If vector search returns no results, fall back to text search
+        if len(results) == 0:
+            print("Vector search returned no results, trying text search...")
+            text_results = list(collection.find({
+                "$or": [
+                    {"item_name": {"$regex": query, "$options": "i"}},
+                    {"item_description": {"$regex": query, "$options": "i"}},
+                    {"categories": {"$regex": query, "$options": "i"}},
+                    {"embedding_text": {"$regex": query, "$options": "i"}}
+                ]
+            }).limit(n))
+            
+            print(f"Text search returned {len(text_results)} results")
+            return json.dumps({
+                "results": text_results,
+                "searchType": "text",
+                "query": query,
+                "count": len(text_results)
+            }, default=str)
+        
+        # Format vector search results
+        formatted_results = [
+            {
+                "document": doc.metadata,
+                "score": score,
+                "content": doc.page_content
+            }
+            for doc, score in results
+        ]
+        
+        return json.dumps({
+            "results": formatted_results,
+            "searchType": "vector",
+            "query": query,
+            "count": len(formatted_results)
+        }, default=str)
+        
+    except Exception as error:
+        print(f"Error in item lookup: {error}")
+        import traceback
+        traceback.print_exc()
+        
+        return json.dumps({
+            "error": "Failed to search inventory",
+            "details": str(error),
+            "query": query
+        })
+
+
+def call_agent(client: MongoClient, query: str, thread_id: str) -> str:
+    """Main function to create and run the AI agent"""
+    try:
+        # Database configuration
+        db_name = "inventory_database"
+        db = client[db_name]
+        collection = db["items"]
+        
+        # Store collection reference in tool for access
+        item_lookup.collection = collection
+        
+        # List of available tools
+        tools = [item_lookup]
+        
+        # Initialize the AI model
+        model = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash",
+            temperature=0,
+            max_retries=0,
+            google_api_key=os.getenv("GOOGLE_API_KEY")
+        ).bind_tools(tools)
+        
+        # Decision function: determines next step
+        def should_continue(state: AgentState) -> Literal["tools", "__end__"]:
+            """Determine if we should continue to tools or end"""
+            messages = state["messages"]
+            last_message = messages[-1]
+            
+            # If the AI wants to use tools, go to tools node
+            if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+                return "tools"
+            return "__end__"
+        
+        # Function that calls the AI model
+        def call_model(state: AgentState) -> dict:
+            """Call the model with retry logic"""
+            def _call():
+                # Create prompt template
+                prompt = ChatPromptTemplate.from_messages([
+                    (
+                        "system",
+                        """You are a helpful E-commerce Chatbot Agent for a furniture store. 
+
+IMPORTANT: You have access to an item_lookup tool that searches the furniture inventory database. ALWAYS use this tool when customers ask about furniture items, even if the tool returns errors or empty results.
+
+When using the item_lookup tool:
+- If it returns results, provide helpful details about the furniture items
+- If it returns an error or no results, acknowledge this and offer to help in other ways
+- If the database appears to be empty, let the customer know that inventory might be being updated
+
+Current time: {time}"""
+                    ),
+                    MessagesPlaceholder(variable_name="messages")
+                ])
+                
+                # Format the prompt
+                formatted_prompt = prompt.format_messages(
+                    time=datetime.now().isoformat(),
+                    messages=state["messages"]
+                )
+                
+                # Call the model
+                result = model.invoke(formatted_prompt)
+                return {"messages": [result]}
+            
+            return retry_with_backoff(_call)
+        
+        # Build the workflow graph
+        workflow = StateGraph(AgentState)
+        
+        # Add nodes
+        workflow.add_node("agent", call_model)
+        workflow.add_node("tools", ToolNode(tools))
+        
+        # Add edges
+        workflow.set_entry_point("agent")
+        workflow.add_conditional_edges(
+            "agent",
+            should_continue,
+            {
+                "tools": "tools",
+                "__end__": END
+            }
+        )
+        workflow.add_edge("tools", "agent")
+        
+        # Initialize checkpointer
+        checkpointer = MongoDBSaver(client=client, db_name=db_name)
+        
+        # Compile the workflow
+        app = workflow.compile(checkpointer=checkpointer)
+        
+        # Execute the workflow
+        config = {
+            "configurable": {"thread_id": thread_id},
+            "recursion_limit": 15
+        }
+        
+        final_state = app.invoke(
+            {"messages": [HumanMessage(content=query)]},
+            config=config
+        )
+        
+        # Extract the final response
+        response = final_state["messages"][-1].content
+        print(f"Agent response: {response}")
+        
+        return response
+        
+    except Exception as error:
+        print(f"Error in call_agent: {error}")
+        import traceback
+        traceback.print_exc()
+        
+        if hasattr(error, 'status_code'):
+            if error.status_code == 429:
+                raise Exception("Service temporarily unavailable due to rate limits. Please try again in a minute.")
+            elif error.status_code == 401:
+                raise Exception("Authentication failed. Please check your API configuration.")
+        
+        raise Exception(f"Agent failed: {str(error)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Furniture Store AI Chatbot - Python Version
+
+A complete Python implementation of an AI-powered furniture store chatbot using LangGraph, Google Gemini, and MongoDB Atlas.
+
+## Features
+
+- **AI-Powered Chat**: Uses Google Gemini 1.5 Flash for intelligent conversations
+- **Vector Search**: MongoDB Atlas vector search for semantic furniture queries
+- **Conversation Memory**: Persistent chat history using MongoDB checkpointing
+- **RAG Architecture**: Retrieval-Augmented Generation for accurate product information
+- **RESTful API**: FastAPI server with CORS support
+
+## Project Structure
+
+```
+.
+├── seed_database.py    # Generate and seed synthetic furniture data
+├── agent.py           # LangGraph agent with tool calling
+├── main.py            # FastAPI server
+├── requirements.txt   # Python dependencies
+├── .env              # Environment variables (create from .env.example)
+└── .env.example      # Template for environment variables
+```
+
+## Prerequisites
+
+1. **Python 3.9+**
+2. **MongoDB Atlas Account**: [Sign up here](https://www.mongodb.com/cloud/atlas/register)
+3. **Google AI Studio API Key**: [Get it here](https://makersuite.google.com/app/apikey)
+
+## Setup Instructions
+
+### 1. Clone and Install Dependencies
+
+```bash
+# Install Python dependencies
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and add your credentials:
+
+```env
+MONGODB_ATLAS_URI=mongodb+srv://username:password@cluster.mongodb.net/?retryWrites=true&w=majority
+GOOGLE_API_KEY=your_google_api_key_here
+PORT=8000
+```
+
+### 3. Set Up MongoDB Atlas Vector Search
+
+1. Go to your MongoDB Atlas dashboard
+2. Navigate to your cluster → **Search** tab
+3. Click **Create Search Index**
+4. Choose **JSON Editor**
+5. Paste this configuration:
+
+```json
+{
+  "name": "vector_index",
+  "type": "vectorSearch",
+  "definition": {
+    "fields": [
+      {
+        "type": "vector",
+        "path": "embedding",
+        "numDimensions": 768,
+        "similarity": "cosine"
+      }
+    ]
+  }
+}
+```
+
+6. Select database: `inventory_database`
+7. Select collection: `items`
+8. Click **Create Search Index**
+
+### 4. Seed the Database
+
+Generate synthetic furniture data and populate MongoDB:
+
+```bash
+python seed_database.py
+```
+
+This will:
+- Connect to MongoDB Atlas
+- Generate 10 synthetic furniture items using Gemini AI
+- Create vector embeddings for semantic search
+- Store data in the `inventory_database.items` collection
+
+### 5. Start the Server
+
+```bash
+python main.py
+```
+
+Or with uvicorn directly:
+
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+The server will start at `http://localhost:8000`
+
+## API Endpoints
+
+### 1. Health Check
+```bash
+GET /
+```
+
+### 2. Start New Conversation
+```bash
+POST /chat
+Content-Type: application/json
+
+{
+  "message": "Show me comfortable sofas"
+}
+```
+
+Response:
+```json
+{
+  "threadId": "1234567890123",
+  "response": "I found several comfortable sofas..."
+}
+```
+
+### 3. Continue Conversation
+```bash
+POST /chat/{threadId}
+Content-Type: application/json
+
+{
+  "message": "What about the prices?"
+}
+```
+
+Response:
+```json
+{
+  "response": "The prices range from..."
+}
+```
+
+## Testing the API
+
+### Using curl
+
+```bash
+# Start new chat
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Show me modern dining tables"}'
+
+# Continue chat (use threadId from previous response)
+curl -X POST http://localhost:8000/chat/1234567890123 \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What colors are available?"}'
+```
+
+### Using Python
+
+```python
+import requests
+
+# Start new chat
+response = requests.post(
+    "http://localhost:8000/chat",
+    json={"message": "Show me comfortable sofas"}
+)
+data = response.json()
+print(f"Response: {data['response']}")
+print(f"Thread ID: {data['threadId']}")
+
+# Continue chat
+response = requests.post(
+    f"http://localhost:8000/chat/{data['threadId']}",
+    json={"message": "What about prices?"}
+)
+print(f"Response: {response.json()['response']}")
+```
+
+## How It Works
+
+### 1. Data Generation (seed_database.py)
+- Uses Gemini AI to generate realistic furniture data
+- Creates searchable summaries combining item details
+- Generates 768-dimensional embeddings using Google's text-embedding-004 model
+- Stores in MongoDB with vector search capabilities
+
+### 2. Agent Logic (agent.py)
+- **LangGraph Workflow**: State-based agent with tool calling
+- **Item Lookup Tool**: Searches furniture inventory using vector similarity
+- **Fallback Search**: Uses regex text search if vector search fails
+- **Conversation Memory**: MongoDB checkpointing maintains chat history
+- **Retry Logic**: Handles rate limits with exponential backoff
+
+### 3. API Server (main.py)
+- FastAPI server with CORS support
+- Thread-based conversation management
+- Error handling and logging
+
+## Key Differences from TypeScript
+
+1. **Type System**: Uses Pydantic models instead of Zod schemas
+2. **Async/Await**: Python's async is optional in this implementation
+3. **Tool Definition**: Uses LangChain's `@tool` decorator
+4. **State Management**: TypedDict instead of TypeScript interfaces
+5. **Web Framework**: FastAPI instead of Express.js
+
+## Troubleshooting
+
+### "Collection is empty" error
+- Run `python seed_database.py` to populate the database
+- Verify MongoDB connection string in `.env`
+
+### Rate limit errors
+- The agent includes retry logic with exponential backoff
+- If persistent, check your Google API quota
+
+### Vector search not working
+- Ensure vector search index is created in MongoDB Atlas
+- Index name must be "vector_index"
+- numDimensions must be 768 (matching text-embedding-004)
+
+### Import errors
+- Ensure all dependencies are installed: `pip install -r requirements.txt`
+- Use Python 3.9 or higher
+
+## Production Deployment
+
+For production, consider:
+
+1. **Environment Variables**: Use proper secret management
+2. **Rate Limiting**: Add rate limiting middleware
+3. **Authentication**: Implement user authentication
+4. **Logging**: Add structured logging (e.g., using loguru)
+5. **Monitoring**: Add health checks and metrics
+6. **WSGI Server**: Use Gunicorn with Uvicorn workers
+
+Example production command:
+```bash
+gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+```
+
+## License
+
+MIT License - Feel free to use this code for your projects!
